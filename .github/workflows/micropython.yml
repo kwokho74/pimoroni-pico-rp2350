@@ -14,12 +14,12 @@ jobs:
     strategy:
       matrix:
         include:
-        - name: rpi_pico2
+        # - name: rpi_pico2
         - name: rpi_pico2_w
-        - name: rpi_pico2b
-        - name: pimoroni_plasma2350
-        - name: pimoroni_tiny2350
-        - name: pimoroni_pico_plus2
+        # - name: rpi_pico2b
+        # - name: pimoroni_plasma2350
+        # - name: pimoroni_tiny2350
+        # - name: pimoroni_pico_plus2
 
     env:
       # MicroPython version will be contained in github.event.release.tag_name for releases

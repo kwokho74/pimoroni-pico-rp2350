@@ -5,11 +5,11 @@ add_library(usermod_bsec3 INTERFACE)
 target_sources(usermod_bsec3 INTERFACE
     ${CMAKE_CURRENT_LIST_DIR}/bsec_wrapper.c
     ${CMAKE_CURRENT_LIST_DIR}/bsec3_bme68x.c
-    ${CMAKE_CURRENT_LIST_DIR}/bme68x.c
 )
 
 target_include_directories(usermod_bsec3 INTERFACE
     ${CMAKE_CURRENT_LIST_DIR}
+    ${PIMORONI_PICO_PATH}/drivers/bme68x/src
 )
 
 add_library(algobsec3 STATIC IMPORTED)

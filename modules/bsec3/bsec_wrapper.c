@@ -240,7 +240,9 @@ static mp_obj_t bsec3_update_subscription_wrapper(mp_obj_t inst_id_obj, mp_obj_t
         requested_configs, (uint8_t)n_requested,
         required_configs,  &n_required
     );
-    if (result != BSEC_OK) {
+    // Negative rc = error (return None); zero or positive = OK/warning (still
+    // return the required-sensor list, which may be empty).
+    if (result < 0) {
         return to_result_tuple_none(result);
     }
 

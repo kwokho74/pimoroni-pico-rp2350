@@ -10,7 +10,7 @@
 // Multi-instance management
 // ---------------------------------------------------------------------------
 #define BSEC3_MAX_INSTANCES 4
-static void *bsec3_instances[BSEC3_MAX_INSTANCES];
+void *bsec3_instances[BSEC3_MAX_INSTANCES];
 
 // Resolve an integer instance id to the allocated instance pointer.
 static void *resolve_instance(mp_obj_t inst_id_obj) {

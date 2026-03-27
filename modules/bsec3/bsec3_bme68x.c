@@ -37,11 +37,15 @@
 /* Pico SDK 64-bit timer — needed for a stable ns-resolution timestamp */
 #include "hardware/timer.h"
 
-/* -------------------------------------------------------------------------
- * BSEC instance table — defined (non-static) in bsec_wrapper.c
- * ------------------------------------------------------------------------- */
-#define BSEC3_MAX_INSTANCES 4
-extern void *bsec3_instances[BSEC3_MAX_INSTANCES];
+/* Clamp sleep_us (int64_t) to mp_int_t range for mp_obj_new_int().
+   300s ULP mode fits in 32-bit, but clamp defensively. */
+static inline mp_int_t clamp_sleep_us(int64_t us) {
+    if (us < 0) return 0;
+    if (us > 0x7FFFFFFF) return 0x7FFFFFFF;
+    return (mp_int_t)us;
+}
+
+#include "bsec3_common.h"
 
 static void *resolve_bsec_instance(mp_obj_t inst_id_obj) {
     int id = mp_obj_get_int(inst_id_obj);
@@ -200,7 +204,7 @@ static mp_obj_t bme68x_run_cycle(mp_obj_t self_in, mp_obj_t inst_id_obj) {
     /* --- 2. BSEC sensor control ----------------------------------------- */
     bsec_bme_settings_t settings;
     bsec_library_return_t rc = bsec_sensor_control(inst, ts_ns, &settings);
-    if (rc != BSEC_OK) {
+    if (rc < 0) {
         mp_raise_msg_varg(&mp_type_RuntimeError,
             MP_ERROR_TEXT("bsec_sensor_control failed: %d"), (int)rc);
     }
@@ -209,7 +213,7 @@ static mp_obj_t bme68x_run_cycle(mp_obj_t self_in, mp_obj_t inst_id_obj) {
     if (!settings.trigger_measurement) {
         int64_t sleep_us = (settings.next_call / 1000LL) - (int64_t)time_us_64();
         if (sleep_us < 0) sleep_us = 0;
-        mp_obj_t ret[2] = { mp_obj_new_int((mp_int_t)sleep_us), mp_const_none };
+        mp_obj_t ret[2] = { mp_obj_new_int(clamp_sleep_us(sleep_us)), mp_const_none };
         return mp_obj_new_tuple(2, ret);
     }
 
@@ -230,6 +234,9 @@ static mp_obj_t bme68x_run_cycle(mp_obj_t self_in, mp_obj_t inst_id_obj) {
     }
 
     /* --- 5. Heater configuration ----------------------------------------- */
+    /* Forced mode uses single heater step; profile pointers left NULL
+       (zero-initialised) which is correct — bme68x_set_heatr_conf only
+       dereferences them in sequential/parallel mode. */
     struct bme68x_heatr_conf hcfg = {
         .enable    = settings.run_gas ? BME68X_ENABLE : BME68X_DISABLE,
         .heatr_temp = settings.heater_temperature,   /* °C */
@@ -258,7 +265,7 @@ static mp_obj_t bme68x_run_cycle(mp_obj_t self_in, mp_obj_t inst_id_obj) {
     struct bme68x_data data[3];  /* forced mode yields at most 1 field       */
     uint8_t n_fields = 0;
     brc = bme68x_get_data(BME68X_FORCED_MODE, data, &n_fields, &self->dev);
-    if (brc != BME68X_OK) {
+    if (brc < BME68X_OK) {
         mp_raise_msg_varg(&mp_type_RuntimeError,
             MP_ERROR_TEXT("bme68x_get_data failed: %d"), (int)brc);
     }
@@ -266,9 +273,12 @@ static mp_obj_t bme68x_run_cycle(mp_obj_t self_in, mp_obj_t inst_id_obj) {
         /* No new data — BSEC timing will recover on the next call */
         int64_t sleep_us = (settings.next_call / 1000LL) - (int64_t)time_us_64();
         if (sleep_us < 0) sleep_us = 0;
-        mp_obj_t ret[2] = { mp_obj_new_int((mp_int_t)sleep_us), mp_const_none };
+        mp_obj_t ret[2] = { mp_obj_new_int(clamp_sleep_us(sleep_us)), mp_const_none };
         return mp_obj_new_tuple(2, ret);
     }
+
+    /* Update timestamp to actual measurement time for BSEC inputs */
+    ts_ns = (int64_t)time_us_64() * 1000LL;
 
     /* --- 9. Build BSEC inputs -------------------------------------------- */
     /* Use the first field only (forced mode always delivers field 0).
@@ -316,7 +326,7 @@ static mp_obj_t bme68x_run_cycle(mp_obj_t self_in, mp_obj_t inst_id_obj) {
         /* No data matched the process_data bitmask */
         int64_t sleep_us = (settings.next_call / 1000LL) - (int64_t)time_us_64();
         if (sleep_us < 0) sleep_us = 0;
-        mp_obj_t ret[2] = { mp_obj_new_int((mp_int_t)sleep_us), mp_const_none };
+        mp_obj_t ret[2] = { mp_obj_new_int(clamp_sleep_us(sleep_us)), mp_const_none };
         return mp_obj_new_tuple(2, ret);
     }
 
@@ -324,7 +334,7 @@ static mp_obj_t bme68x_run_cycle(mp_obj_t self_in, mp_obj_t inst_id_obj) {
     bsec_output_t bsec_outputs[BSEC_NUMBER_OUTPUTS];
     uint8_t n_outputs = BSEC_NUMBER_OUTPUTS;
     rc = bsec_do_steps(inst, inputs, n_inputs, bsec_outputs, &n_outputs);
-    if (rc != BSEC_OK) {
+    if (rc < 0) {
         mp_raise_msg_varg(&mp_type_RuntimeError,
             MP_ERROR_TEXT("bsec_do_steps failed: %d"), (int)rc);
     }
@@ -336,7 +346,7 @@ static mp_obj_t bme68x_run_cycle(mp_obj_t self_in, mp_obj_t inst_id_obj) {
 
     if (n_outputs == 0) {
         /* BSEC produced no outputs (can happen during warm-up) */
-        mp_obj_t ret[2] = { mp_obj_new_int((mp_int_t)sleep_us), mp_const_none };
+        mp_obj_t ret[2] = { mp_obj_new_int(clamp_sleep_us(sleep_us)), mp_const_none };
         return mp_obj_new_tuple(2, ret);
     }
 
@@ -352,7 +362,7 @@ static mp_obj_t bme68x_run_cycle(mp_obj_t self_in, mp_obj_t inst_id_obj) {
                           mp_obj_new_tuple(3, tup));
     }
 
-    mp_obj_t ret[2] = { mp_obj_new_int((mp_int_t)sleep_us), outputs_list };
+    mp_obj_t ret[2] = { mp_obj_new_int(clamp_sleep_us(sleep_us)), outputs_list };
     return mp_obj_new_tuple(2, ret);
 }
 static MP_DEFINE_CONST_FUN_OBJ_2(bme68x_run_cycle_obj, bme68x_run_cycle);

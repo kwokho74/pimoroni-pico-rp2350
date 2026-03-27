@@ -6,11 +6,13 @@
 #include "bsec_datatypes.h"
 #include "bsec_interface.h"
 
+#include "bsec3_common.h"
+
 // ---------------------------------------------------------------------------
 // Multi-instance management
 // ---------------------------------------------------------------------------
-#define BSEC3_MAX_INSTANCES 4
 void *bsec3_instances[BSEC3_MAX_INSTANCES];
+static size_t bsec3_instance_size = 0;
 
 // Resolve an integer instance id to the allocated instance pointer.
 static void *resolve_instance(mp_obj_t inst_id_obj) {
@@ -91,6 +93,17 @@ static mp_obj_t sensor_settings_to_dict(const bsec_bme_settings_t *settings) {
     mp_obj_dict_store(dict, MP_OBJ_NEW_QSTR(MP_QSTR_pressure_oversampling),     mp_obj_new_int(settings->pressure_oversampling));
     mp_obj_dict_store(dict, MP_OBJ_NEW_QSTR(MP_QSTR_temperature_oversampling),  mp_obj_new_int(settings->temperature_oversampling));
     mp_obj_dict_store(dict, MP_OBJ_NEW_QSTR(MP_QSTR_humidity_oversampling),     mp_obj_new_int(settings->humidity_oversampling));
+    mp_obj_dict_store(dict, MP_OBJ_NEW_QSTR(MP_QSTR_heater_profile_len),        mp_obj_new_int(settings->heater_profile_len));
+    uint8_t plen = settings->heater_profile_len;
+    if (plen > 10) plen = 10;
+    mp_obj_t temp_profile[10];
+    mp_obj_t dur_profile[10];
+    for (uint8_t i = 0; i < plen; i++) {
+        temp_profile[i] = mp_obj_new_int(settings->heater_temperature_profile[i]);
+        dur_profile[i]  = mp_obj_new_int(settings->heater_duration_profile[i]);
+    }
+    mp_obj_dict_store(dict, MP_OBJ_NEW_QSTR(MP_QSTR_heater_temperature_profile), mp_obj_new_tuple(plen, temp_profile));
+    mp_obj_dict_store(dict, MP_OBJ_NEW_QSTR(MP_QSTR_heater_duration_profile),    mp_obj_new_tuple(plen, dur_profile));
     return dict;
 }
 
@@ -101,9 +114,11 @@ static mp_obj_t sensor_settings_to_dict(const bsec_bme_settings_t *settings) {
 static mp_obj_t bsec3_create_instance_wrapper(void) {
     for (int i = 0; i < BSEC3_MAX_INSTANCES; i++) {
         if (bsec3_instances[i] == NULL) {
-            size_t inst_size = bsec_get_instance_size();
-            bsec3_instances[i] = m_malloc(inst_size);
-            memset(bsec3_instances[i], 0, inst_size);
+            if (bsec3_instance_size == 0) {
+                bsec3_instance_size = bsec_get_instance_size();
+            }
+            bsec3_instances[i] = m_malloc(bsec3_instance_size);
+            memset(bsec3_instances[i], 0, bsec3_instance_size);
             return mp_obj_new_int(i);
         }
     }
@@ -144,7 +159,7 @@ static mp_obj_t bsec3_get_version_wrapper(mp_obj_t inst_id_obj) {
     void *inst = resolve_instance(inst_id_obj);
     bsec_version_t version;
     bsec_library_return_t result = bsec_get_version(inst, &version);
-    if (result != BSEC_OK) {
+    if (result < 0) {
         return to_result_tuple_none(result);
     }
     mp_obj_t ver[4];
@@ -190,12 +205,33 @@ static mp_obj_t bsec3_get_state_wrapper(mp_obj_t inst_id_obj) {
         work_buffer,  BSEC_MAX_WORKBUFFER_SIZE,
         &n_serialized_state
     );
-    if (result != BSEC_OK) {
+    if (result < 0) {
         return to_result_tuple_none(result);
     }
     return to_result_tuple(result, mp_obj_new_bytes(state_buffer, n_serialized_state));
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(bsec3_get_state_obj, bsec3_get_state_wrapper);
+
+// ---------------------------------------------------------------------------
+// get_configuration(inst_id) -> (rc, bytes)
+// ---------------------------------------------------------------------------
+static mp_obj_t bsec3_get_configuration_wrapper(mp_obj_t inst_id_obj) {
+    void *inst = resolve_instance(inst_id_obj);
+    uint8_t config_buffer[BSEC_MAX_PROPERTY_BLOB_SIZE];
+    uint8_t work_buffer[BSEC_MAX_WORKBUFFER_SIZE];
+    uint32_t n_serialized_settings;
+    bsec_library_return_t result = bsec_get_configuration(
+        inst, 0,
+        config_buffer, BSEC_MAX_PROPERTY_BLOB_SIZE,
+        work_buffer,   BSEC_MAX_WORKBUFFER_SIZE,
+        &n_serialized_settings
+    );
+    if (result < 0) {
+        return to_result_tuple_none(result);
+    }
+    return to_result_tuple(result, mp_obj_new_bytes(config_buffer, n_serialized_settings));
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(bsec3_get_configuration_obj, bsec3_get_configuration_wrapper);
 
 // ---------------------------------------------------------------------------
 // set_state(inst_id, state_bytes) -> int
@@ -227,6 +263,9 @@ static mp_obj_t bsec3_update_subscription_wrapper(mp_obj_t inst_id_obj, mp_obj_t
     size_t n_requested;
     mp_obj_get_array(requested_obj, &n_requested, &requested_items);
 
+    if (n_requested > BSEC_NUMBER_OUTPUTS) {
+        mp_raise_ValueError(MP_ERROR_TEXT("Too many requested sensors"));
+    }
     bsec_sensor_configuration_t requested_configs[n_requested];
     bsec_sensor_configuration_t required_configs[BSEC_MAX_PHYSICAL_SENSOR];
 
@@ -264,7 +303,7 @@ static mp_obj_t bsec3_sensor_control_wrapper(mp_obj_t inst_id_obj, mp_obj_t ts_h
     uint32_t ts_low  = mp_obj_get_int_truncated(ts_low_obj);
     bsec_bme_settings_t sensor_settings;
     bsec_library_return_t result = bsec_sensor_control(inst, from_uint_high_low(ts_high, ts_low), &sensor_settings);
-    if (result != BSEC_OK) {
+    if (result < 0) {
         return to_result_tuple_none(result);
     }
     return to_result_tuple(result, sensor_settings_to_dict(&sensor_settings));
@@ -281,6 +320,9 @@ static mp_obj_t bsec3_do_steps_wrapper(mp_obj_t inst_id_obj, mp_obj_t inputs_obj
     size_t n_inputs;
     mp_obj_get_array(inputs_obj, &n_inputs, &input_items);
 
+    if (n_inputs > BSEC_MAX_PHYSICAL_SENSOR) {
+        mp_raise_ValueError(MP_ERROR_TEXT("Too many inputs"));
+    }
     bsec_input_t bsec_inputs[n_inputs];
     for (size_t i = 0; i < n_inputs; i++) {
         mp_obj_t *fields;
@@ -300,7 +342,7 @@ static mp_obj_t bsec3_do_steps_wrapper(mp_obj_t inst_id_obj, mp_obj_t inputs_obj
     bsec_output_t outputs[BSEC_NUMBER_OUTPUTS];
     uint8_t n_outputs = BSEC_NUMBER_OUTPUTS;
     bsec_library_return_t result = bsec_do_steps(inst, bsec_inputs, (uint8_t)n_inputs, outputs, &n_outputs);
-    if (result != BSEC_OK) {
+    if (result < 0) {
         return to_result_tuple_none(result);
     }
 
@@ -341,6 +383,7 @@ static const mp_rom_map_elem_t bsec3_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_get_version),       MP_ROM_PTR(&bsec3_get_version_obj) },
     { MP_ROM_QSTR(MP_QSTR_set_configuration), MP_ROM_PTR(&bsec3_set_configuration_obj) },
     { MP_ROM_QSTR(MP_QSTR_get_state),         MP_ROM_PTR(&bsec3_get_state_obj) },
+    { MP_ROM_QSTR(MP_QSTR_get_configuration), MP_ROM_PTR(&bsec3_get_configuration_obj) },
     { MP_ROM_QSTR(MP_QSTR_set_state),         MP_ROM_PTR(&bsec3_set_state_obj) },
     { MP_ROM_QSTR(MP_QSTR_update_subscription), MP_ROM_PTR(&bsec3_update_subscription_obj) },
     { MP_ROM_QSTR(MP_QSTR_sensor_control),    MP_ROM_PTR(&bsec3_sensor_control_obj) },
